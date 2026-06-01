@@ -1,0 +1,8 @@
+*
+!.gitignore
+!README.md
+!everflow_headless.py
+
+__pycache__/
+*.pyc
+.DS_Store
