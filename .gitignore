@@ -2,6 +2,9 @@
 !.gitignore
 !README.md
 !everflow_headless.py
+!package.json
+!bin/
+!bin/everflow.js
 
 __pycache__/
 *.pyc

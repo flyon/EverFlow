@@ -1,0 +1,26 @@
+{
+  "name": "everflow",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "everflow": "bin/everflow.js"
+  },
+  "scripts": {
+    "dev": "tauri dev",
+    "frontend:dev": "vite --host 127.0.0.1",
+    "build": "tsc && vite build && tauri build",
+    "frontend:build": "tsc && vite build",
+    "test": "vitest run",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.11.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.11.2",
+    "typescript": "^5.9.3",
+    "vite": "^7.2.4",
+    "vitest": "^4.0.14"
+  }
+}

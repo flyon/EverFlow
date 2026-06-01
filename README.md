@@ -6,6 +6,14 @@ It runs quietly from a terminal, waits for a period of inactivity, then keeps th
 
 ## Run
 
+With Node/npm installed:
+
+```bash
+npx github:flyon/EverFlow
+```
+
+Or run the Python file directly:
+
 ```bash
 python3 everflow_headless.py
 ```
