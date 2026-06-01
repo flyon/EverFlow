@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-EverFlow headless macOS automation.
+EverFlow headless session helper.
 
 Run:
     python3 everflow_headless.py
@@ -8,9 +8,8 @@ Run:
 Stop:
     Ctrl+C, close the terminal, or terminate the process.
 
-The script controls the centered 33% of the main display by default and
-randomly performs move-only, click, scroll, and click/scroll combinations.
-macOS Accessibility permission is required for the terminal app running it.
+The script controls the centered 33% of the main display by default.
+It supports macOS and Windows without third-party Python packages.
 """
 
 from __future__ import annotations
@@ -22,46 +21,77 @@ import signal
 import sys
 import time
 from dataclasses import dataclass
-from typing import Iterable
 
 
-if sys.platform != "darwin":
-    raise SystemExit("This script is macOS-only.")
+IS_MACOS = sys.platform == "darwin"
+IS_WINDOWS = sys.platform.startswith("win")
 
+if not (IS_MACOS or IS_WINDOWS):
+    raise SystemExit("This script currently supports macOS and Windows.")
 
-APP = ctypes.cdll.LoadLibrary("/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices")
+APP = None
+USER32 = None
+KERNEL32 = None
 
 
 class CGPoint(ctypes.Structure):
     _fields_ = [("x", ctypes.c_double), ("y", ctypes.c_double)]
 
 
-class CGRect(ctypes.Structure):
-    _fields_ = [("origin", CGPoint), ("size", CGPoint)]
+class WinPoint(ctypes.Structure):
+    _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
 
 
-APP.CGMainDisplayID.restype = ctypes.c_uint32
-APP.CGDisplayPixelsWide.argtypes = [ctypes.c_uint32]
-APP.CGDisplayPixelsWide.restype = ctypes.c_size_t
-APP.CGDisplayPixelsHigh.argtypes = [ctypes.c_uint32]
-APP.CGDisplayPixelsHigh.restype = ctypes.c_size_t
-APP.CGEventCreate.restype = ctypes.c_void_p
-APP.CGEventGetLocation.argtypes = [ctypes.c_void_p]
-APP.CGEventGetLocation.restype = CGPoint
-APP.CFRelease.argtypes = [ctypes.c_void_p]
-APP.CGEventCreateMouseEvent.argtypes = [ctypes.c_void_p, ctypes.c_uint32, CGPoint, ctypes.c_uint32]
-APP.CGEventCreateMouseEvent.restype = ctypes.c_void_p
-APP.CGEventCreateScrollWheelEvent.argtypes = [
-    ctypes.c_void_p,
-    ctypes.c_uint32,
-    ctypes.c_uint32,
-    ctypes.c_int32,
-]
-APP.CGEventCreateScrollWheelEvent.restype = ctypes.c_void_p
-APP.CGEventPost.argtypes = [ctypes.c_uint32, ctypes.c_void_p]
-APP.AXIsProcessTrusted.restype = ctypes.c_bool
-APP.CGEventSourceSecondsSinceLastEventType.argtypes = [ctypes.c_uint32, ctypes.c_uint32]
-APP.CGEventSourceSecondsSinceLastEventType.restype = ctypes.c_double
+class LastInputInfo(ctypes.Structure):
+    _fields_ = [("cbSize", ctypes.c_uint), ("dwTime", ctypes.c_uint)]
+
+
+if IS_MACOS:
+    APP = ctypes.cdll.LoadLibrary("/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices")
+
+    APP.CGMainDisplayID.restype = ctypes.c_uint32
+    APP.CGDisplayPixelsWide.argtypes = [ctypes.c_uint32]
+    APP.CGDisplayPixelsWide.restype = ctypes.c_size_t
+    APP.CGDisplayPixelsHigh.argtypes = [ctypes.c_uint32]
+    APP.CGDisplayPixelsHigh.restype = ctypes.c_size_t
+    APP.CGEventCreate.restype = ctypes.c_void_p
+    APP.CGEventGetLocation.argtypes = [ctypes.c_void_p]
+    APP.CGEventGetLocation.restype = CGPoint
+    APP.CFRelease.argtypes = [ctypes.c_void_p]
+    APP.CGEventCreateMouseEvent.argtypes = [ctypes.c_void_p, ctypes.c_uint32, CGPoint, ctypes.c_uint32]
+    APP.CGEventCreateMouseEvent.restype = ctypes.c_void_p
+    APP.CGEventCreateScrollWheelEvent.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.c_uint32,
+        ctypes.c_int32,
+    ]
+    APP.CGEventCreateScrollWheelEvent.restype = ctypes.c_void_p
+    APP.CGEventPost.argtypes = [ctypes.c_uint32, ctypes.c_void_p]
+    APP.AXIsProcessTrusted.restype = ctypes.c_bool
+    APP.CGEventSourceSecondsSinceLastEventType.argtypes = [ctypes.c_uint32, ctypes.c_uint32]
+    APP.CGEventSourceSecondsSinceLastEventType.restype = ctypes.c_double
+
+if IS_WINDOWS:
+    USER32 = ctypes.windll.user32
+    KERNEL32 = ctypes.windll.kernel32
+    USER32.SetProcessDPIAware()
+    USER32.GetSystemMetrics.argtypes = [ctypes.c_int]
+    USER32.GetSystemMetrics.restype = ctypes.c_int
+    USER32.GetCursorPos.argtypes = [ctypes.POINTER(WinPoint)]
+    USER32.GetCursorPos.restype = ctypes.c_bool
+    USER32.SetCursorPos.argtypes = [ctypes.c_int, ctypes.c_int]
+    USER32.SetCursorPos.restype = ctypes.c_bool
+    USER32.mouse_event.argtypes = [
+        ctypes.c_uint,
+        ctypes.c_uint,
+        ctypes.c_uint,
+        ctypes.c_int,
+        ctypes.c_void_p,
+    ]
+    USER32.GetLastInputInfo.argtypes = [ctypes.POINTER(LastInputInfo)]
+    USER32.GetLastInputInfo.restype = ctypes.c_bool
+    KERNEL32.GetTickCount.restype = ctypes.c_uint
 
 
 K_CG_EVENT_MOUSE_MOVED = 5
@@ -72,6 +102,13 @@ K_CG_EVENT_TAP_HID = 0
 K_CG_SCROLL_EVENT_UNIT_LINE = 1
 K_CG_EVENT_SOURCE_STATE_COMBINED_SESSION = 0
 K_CG_ANY_INPUT_EVENT_TYPE = 0xFFFFFFFF
+
+WIN_SM_CXSCREEN = 0
+WIN_SM_CYSCREEN = 1
+WIN_MOUSEEVENTF_LEFTDOWN = 0x0002
+WIN_MOUSEEVENTF_LEFTUP = 0x0004
+WIN_MOUSEEVENTF_WHEEL = 0x0800
+WIN_WHEEL_DELTA = 120
 
 
 RUNNING = True
@@ -102,8 +139,12 @@ signal.signal(signal.SIGTERM, stop)
 
 
 def main_display_size() -> tuple[int, int]:
-    display = APP.CGMainDisplayID()
-    return int(APP.CGDisplayPixelsWide(display)), int(APP.CGDisplayPixelsHigh(display))
+    if IS_MACOS:
+        display = APP.CGMainDisplayID()
+        return int(APP.CGDisplayPixelsWide(display)), int(APP.CGDisplayPixelsHigh(display))
+    if IS_WINDOWS:
+        return int(USER32.GetSystemMetrics(WIN_SM_CXSCREEN)), int(USER32.GetSystemMetrics(WIN_SM_CYSCREEN))
+    raise RuntimeError("Unsupported platform.")
 
 
 def default_area() -> Rect:
@@ -119,42 +160,77 @@ def default_area() -> Rect:
 
 
 def current_mouse_position() -> Point:
-    event = APP.CGEventCreate(None)
-    if not event:
+    if IS_MACOS:
+        event = APP.CGEventCreate(None)
+        if not event:
+            return Point(500, 500)
+        location = APP.CGEventGetLocation(event)
+        APP.CFRelease(event)
+        return Point(location.x, location.y)
+    if IS_WINDOWS:
+        point = WinPoint()
+        if USER32.GetCursorPos(ctypes.byref(point)):
+            return Point(float(point.x), float(point.y))
         return Point(500, 500)
-    location = APP.CGEventGetLocation(event)
-    APP.CFRelease(event)
-    return Point(location.x, location.y)
+    raise RuntimeError("Unsupported platform.")
 
 
 def post_mouse_event(kind: int, point: Point) -> None:
-    event = APP.CGEventCreateMouseEvent(None, kind, CGPoint(point.x, point.y), K_CG_MOUSE_BUTTON_LEFT)
-    if event:
-        APP.CGEventPost(K_CG_EVENT_TAP_HID, event)
-        APP.CFRelease(event)
+    if IS_MACOS:
+        event = APP.CGEventCreateMouseEvent(None, kind, CGPoint(point.x, point.y), K_CG_MOUSE_BUTTON_LEFT)
+        if event:
+            APP.CGEventPost(K_CG_EVENT_TAP_HID, event)
+            APP.CFRelease(event)
+            mark_automation_activity()
+        return
+    if IS_WINDOWS:
+        if kind == K_CG_EVENT_MOUSE_MOVED:
+            USER32.SetCursorPos(int(round(point.x)), int(round(point.y)))
+        elif kind == K_CG_EVENT_LEFT_MOUSE_DOWN:
+            USER32.mouse_event(WIN_MOUSEEVENTF_LEFTDOWN, 0, 0, 0, None)
+        elif kind == K_CG_EVENT_LEFT_MOUSE_UP:
+            USER32.mouse_event(WIN_MOUSEEVENTF_LEFTUP, 0, 0, 0, None)
         mark_automation_activity()
+        return
+    raise RuntimeError("Unsupported platform.")
 
 
 def post_scroll(lines: int) -> None:
-    event = APP.CGEventCreateScrollWheelEvent(
-        None,
-        K_CG_SCROLL_EVENT_UNIT_LINE,
-        1,
-        int(lines),
-    )
-    if event:
-        APP.CGEventPost(K_CG_EVENT_TAP_HID, event)
-        APP.CFRelease(event)
+    if IS_MACOS:
+        event = APP.CGEventCreateScrollWheelEvent(
+            None,
+            K_CG_SCROLL_EVENT_UNIT_LINE,
+            1,
+            int(lines),
+        )
+        if event:
+            APP.CGEventPost(K_CG_EVENT_TAP_HID, event)
+            APP.CFRelease(event)
+            mark_automation_activity()
+        return
+    if IS_WINDOWS:
+        USER32.mouse_event(WIN_MOUSEEVENTF_WHEEL, 0, 0, int(lines) * WIN_WHEEL_DELTA, None)
         mark_automation_activity()
+        return
+    raise RuntimeError("Unsupported platform.")
 
 
 def idle_seconds() -> float:
-    return float(
-        APP.CGEventSourceSecondsSinceLastEventType(
-            K_CG_EVENT_SOURCE_STATE_COMBINED_SESSION,
-            K_CG_ANY_INPUT_EVENT_TYPE,
+    if IS_MACOS:
+        return float(
+            APP.CGEventSourceSecondsSinceLastEventType(
+                K_CG_EVENT_SOURCE_STATE_COMBINED_SESSION,
+                K_CG_ANY_INPUT_EVENT_TYPE,
+            )
         )
-    )
+    if IS_WINDOWS:
+        info = LastInputInfo()
+        info.cbSize = ctypes.sizeof(LastInputInfo)
+        if not USER32.GetLastInputInfo(ctypes.byref(info)):
+            return 0.0
+        elapsed_ms = (int(KERNEL32.GetTickCount()) - int(info.dwTime)) & 0xFFFFFFFF
+        return max(0.0, elapsed_ms / 1000.0)
+    raise RuntimeError("Unsupported platform.")
 
 
 def mark_automation_activity() -> None:
@@ -303,13 +379,15 @@ def run(
     max_interval_ms: int = 7000,
     idle_threshold_seconds: int = 180,
 ) -> None:
-    if not APP.AXIsProcessTrusted():
+    if IS_MACOS and not APP.AXIsProcessTrusted():
         print("Accessibility permission is not enabled.")
         print("Enable it for Terminal/iTerm in System Settings > Privacy & Security > Accessibility.")
         raise SystemExit(1)
 
     scroll_direction = 1 if random.random() < 0.5 else -1
+    platform_name = "macOS" if IS_MACOS else "Windows"
     print(f"EverFlow headless armed. Area: x={area.x:.0f}, y={area.y:.0f}, w={area.width:.0f}, h={area.height:.0f}")
+    print(f"Platform: {platform_name}.")
     print(f"Auto-starts after {idle_threshold_seconds} seconds of inactivity.")
     print("Stop with Ctrl+C or close this terminal.")
 
