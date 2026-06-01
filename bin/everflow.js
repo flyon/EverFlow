@@ -8,20 +8,27 @@ const scriptPath = join(dirname(dirname(fileURLToPath(import.meta.url))), "everf
 const candidates =
   process.platform === "win32"
     ? [
-        ["py", ["-3", scriptPath]],
-        ["python", [scriptPath]],
-        ["python3", [scriptPath]],
+        ["python", []],
+        ["python3", []],
+        ["py", ["-3"]],
+        ["py", []],
       ]
     : [
-        ["python3", [scriptPath]],
-        ["python", [scriptPath]],
+        ["python3", []],
+        ["python", []],
       ];
 
-for (const [command, args] of candidates) {
-  const result = spawnSync(command, args, { stdio: "inherit" });
-  if (result.error?.code === "ENOENT") {
+for (const [command, prefixArgs] of candidates) {
+  const check = spawnSync(
+    command,
+    [...prefixArgs, "-c", "import sys; raise SystemExit(0 if sys.version_info[0] == 3 else 1)"],
+    { stdio: "ignore" },
+  );
+  if (check.error?.code === "ENOENT" || check.status !== 0) {
     continue;
   }
+
+  const result = spawnSync(command, [...prefixArgs, scriptPath], { stdio: "inherit" });
   if (result.error) {
     console.error(result.error.message);
     process.exit(1);
