@@ -12,10 +12,20 @@ With Node/npm installed:
 npx github:flyon/EverFlow
 ```
 
+With an automatic evening pause and user-activity resume:
+
+```bash
+npx github:flyon/EverFlow -- --autoPause=6pm --autoResume
+```
+
 Or run the Python file directly:
 
 ```bash
 python3 everflow_headless.py
+```
+
+```bash
+python3 everflow_headless.py --autoPause=18:00 --autoResume
 ```
 
 ## Stop
@@ -48,3 +58,4 @@ No Python packages are required. If the script is not able to affect the current
 - No Python packages are required.
 - Defaults to the centered third of the main display.
 - Auto-starts after 3 minutes of inactivity.
+- Optional `--autoPause` accepts local times like `6pm`, `6:30pm`, `18:00`, or `1830`.

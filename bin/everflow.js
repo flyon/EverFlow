@@ -5,6 +5,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const scriptPath = join(dirname(dirname(fileURLToPath(import.meta.url))), "everflow_headless.py");
+const scriptArgs = process.argv.slice(2);
 const candidates =
   process.platform === "win32"
     ? [
@@ -28,7 +29,7 @@ for (const [command, prefixArgs] of candidates) {
     continue;
   }
 
-  const result = spawnSync(command, [...prefixArgs, scriptPath], { stdio: "inherit" });
+  const result = spawnSync(command, [...prefixArgs, scriptPath, ...scriptArgs], { stdio: "inherit" });
   if (result.error) {
     console.error(result.error.message);
     process.exit(1);

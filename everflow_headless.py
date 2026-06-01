@@ -14,7 +14,9 @@ It supports macOS and Windows without third-party Python packages.
 
 from __future__ import annotations
 
+import argparse
 import ctypes
+import datetime as dt
 import math
 import random
 import signal
@@ -129,6 +131,14 @@ class Rect:
     height: float
 
 
+@dataclass
+class AutoPauseSchedule:
+    pause_minutes: int | None = None
+    auto_resume: bool = False
+    paused_for_date: dt.date | None = None
+    resumed_for_date: dt.date | None = None
+
+
 def stop(_signum: int, _frame: object) -> None:
     global RUNNING
     RUNNING = False
@@ -240,6 +250,63 @@ def mark_automation_activity() -> None:
 
 def user_activity_detected() -> bool:
     return idle_seconds() < 1.5 and (time.monotonic() - LAST_AUTOMATION_AT) > 2.0
+
+
+def parse_time_of_day(value: str) -> int:
+    normalized = value.strip().lower().replace(" ", "")
+    formats = ["%I:%M%p", "%I%p", "%H:%M", "%H%M", "%H"]
+    for time_format in formats:
+        try:
+            parsed = dt.datetime.strptime(normalized, time_format).time()
+            return parsed.hour * 60 + parsed.minute
+        except ValueError:
+            pass
+    raise argparse.ArgumentTypeError("Use a local time like 6pm, 6:30pm, 18:00, or 1800.")
+
+
+def format_minutes(minutes: int) -> str:
+    hour = minutes // 60
+    minute = minutes % 60
+    suffix = "am" if hour < 12 else "pm"
+    display_hour = hour % 12 or 12
+    if minute == 0:
+        return f"{display_hour}{suffix}"
+    return f"{display_hour}:{minute:02d}{suffix}"
+
+
+def should_auto_pause(schedule: AutoPauseSchedule | None) -> bool:
+    if schedule is None or schedule.pause_minutes is None:
+        return False
+
+    now = dt.datetime.now()
+    today = now.date()
+    current_minutes = now.hour * 60 + now.minute
+    if current_minutes < schedule.pause_minutes:
+        return False
+    if schedule.resumed_for_date == today:
+        return False
+    return True
+
+
+def wait_for_auto_resume(schedule: AutoPauseSchedule) -> None:
+    today = dt.date.today()
+    if schedule.paused_for_date != today:
+        schedule.paused_for_date = today
+        print(f"Auto-pause active after {format_minutes(schedule.pause_minutes or 0)}.")
+
+    if not schedule.auto_resume:
+        while RUNNING and should_auto_pause(schedule):
+            time.sleep(1)
+        return
+
+    print("Waiting for user activity to resume.")
+    while RUNNING and should_auto_pause(schedule):
+        if user_activity_detected():
+            schedule.resumed_for_date = dt.date.today()
+            mark_automation_activity()
+            print("User activity detected; schedule resumed.")
+            return
+        time.sleep(0.5)
 
 
 def sleep_interruptible(seconds: float, stop_on_user_activity: bool = False) -> bool:
@@ -378,6 +445,7 @@ def run(
     min_interval_ms: int = 2500,
     max_interval_ms: int = 7000,
     idle_threshold_seconds: int = 180,
+    schedule: AutoPauseSchedule | None = None,
 ) -> None:
     if IS_MACOS and not APP.AXIsProcessTrusted():
         print("Accessibility permission is not enabled.")
@@ -389,22 +457,39 @@ def run(
     print(f"EverFlow headless armed. Area: x={area.x:.0f}, y={area.y:.0f}, w={area.width:.0f}, h={area.height:.0f}")
     print(f"Platform: {platform_name}.")
     print(f"Auto-starts after {idle_threshold_seconds} seconds of inactivity.")
+    if schedule and schedule.pause_minutes is not None:
+        resume_text = " and resumes on user activity" if schedule.auto_resume else ""
+        print(f"Auto-pauses after {format_minutes(schedule.pause_minutes)}{resume_text}.")
     print("Stop with Ctrl+C or close this terminal.")
 
     while RUNNING:
+        if should_auto_pause(schedule):
+            wait_for_auto_resume(schedule)
+            continue
         while RUNNING and idle_seconds() < idle_threshold_seconds:
+            if should_auto_pause(schedule):
+                wait_for_auto_resume(schedule)
+                break
             time.sleep(1)
         if not RUNNING:
             break
+        if should_auto_pause(schedule):
+            continue
 
         print("Inactive threshold reached; automation active.")
         mark_automation_activity()
         while RUNNING:
+            if should_auto_pause(schedule):
+                wait_for_auto_resume(schedule)
+                break
             wait_ms = random.randint(min_interval_ms, max(max_interval_ms, min_interval_ms + 250))
             if not sleep_interruptible(wait_ms / 1000.0, stop_on_user_activity=True):
                 print("User activity detected; automation paused.")
                 break
             if not RUNNING:
+                break
+            if should_auto_pause(schedule):
+                wait_for_auto_resume(schedule)
                 break
 
             target = random_point(area)
@@ -415,6 +500,9 @@ def run(
 
             for action in choose_actions()[1:]:
                 if not RUNNING:
+                    break
+                if should_auto_pause(schedule):
+                    wait_for_auto_resume(schedule)
                     break
                 if not sleep_interruptible(0.12, stop_on_user_activity=True):
                     print("User activity detected; automation paused.")
@@ -430,5 +518,25 @@ def run(
                 break
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="EverFlow headless session helper.")
+    parser.add_argument(
+        "--autoPause",
+        "--auto-pause",
+        dest="auto_pause",
+        type=parse_time_of_day,
+        help="Pause automation after this local time, for example 6pm, 18:00, or 1830.",
+    )
+    parser.add_argument(
+        "--autoResume",
+        "--auto-resume",
+        dest="auto_resume",
+        action="store_true",
+        help="After auto-pause, resume when real user activity is detected.",
+    )
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
-    run(default_area())
+    args = parse_args()
+    run(default_area(), schedule=AutoPauseSchedule(pause_minutes=args.auto_pause, auto_resume=args.auto_resume))
