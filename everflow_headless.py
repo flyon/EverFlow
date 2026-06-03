@@ -252,6 +252,38 @@ def user_activity_detected() -> bool:
     return idle_seconds() < 1.5 and (time.monotonic() - LAST_AUTOMATION_AT) > 2.0
 
 
+def current_time_label() -> str:
+    return dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def log(message: str, silent: bool = False) -> None:
+    if silent:
+        return
+    print(f"[{current_time_label()}] {message}", flush=True)
+
+
+def run_silent_intro() -> None:
+    frames = [
+        "EF starting    ",
+        "EF starting.   ",
+        "EF starting..  ",
+        "EF starting... ",
+        "EF starting .. ",
+        "EF starting  . ",
+        "EF starting    ",
+        "EF             ",
+        "E              ",
+        "               ",
+    ]
+    for frame in frames:
+        sys.stdout.write("\r" + frame)
+        sys.stdout.flush()
+        time.sleep(0.12)
+    sys.stdout.write("\033[2J\033[H")
+    sys.stdout.flush()
+    print("EF Running...", flush=True)
+
+
 def parse_time_of_day(value: str) -> int:
     normalized = value.strip().lower().replace(" ", "")
     formats = ["%I:%M%p", "%I%p", "%H:%M", "%H%M", "%H"]
@@ -288,23 +320,27 @@ def should_auto_pause(schedule: AutoPauseSchedule | None) -> bool:
     return True
 
 
-def wait_for_auto_resume(schedule: AutoPauseSchedule) -> None:
+def wait_for_auto_resume(schedule: AutoPauseSchedule, silent: bool = False) -> None:
     today = dt.date.today()
     if schedule.paused_for_date != today:
         schedule.paused_for_date = today
-        print(f"Auto-pause active after {format_minutes(schedule.pause_minutes or 0)}.")
+        log(
+            f"Pausing activity because auto-pause time {format_minutes(schedule.pause_minutes or 0)} has passed.",
+            silent,
+        )
 
     if not schedule.auto_resume:
+        log("Waiting because auto-resume is disabled; activity will remain paused for this schedule window.", silent)
         while RUNNING and should_auto_pause(schedule):
             time.sleep(1)
         return
 
-    print("Waiting for user activity to resume.")
+    log("Waiting to resume because --autoResume is enabled and no user activity has been detected yet.", silent)
     while RUNNING and should_auto_pause(schedule):
         if user_activity_detected():
             schedule.resumed_for_date = dt.date.today()
             mark_automation_activity()
-            print("User activity detected; schedule resumed.")
+            log("Resuming activity because user activity was detected after scheduled pause.", silent)
             return
         time.sleep(0.5)
 
@@ -446,6 +482,7 @@ def run(
     max_interval_ms: int = 7000,
     idle_threshold_seconds: int = 180,
     schedule: AutoPauseSchedule | None = None,
+    silent: bool = False,
 ) -> None:
     if IS_MACOS and not APP.AXIsProcessTrusted():
         print("Accessibility permission is not enabled.")
@@ -454,21 +491,27 @@ def run(
 
     scroll_direction = 1 if random.random() < 0.5 else -1
     platform_name = "macOS" if IS_MACOS else "Windows"
-    print(f"EverFlow headless armed. Area: x={area.x:.0f}, y={area.y:.0f}, w={area.width:.0f}, h={area.height:.0f}")
-    print(f"Platform: {platform_name}.")
-    print(f"Auto-starts after {idle_threshold_seconds} seconds of inactivity.")
+    if silent:
+        run_silent_intro()
+    log(f"EverFlow headless armed on {platform_name}.", silent)
+    log(f"Using area x={area.x:.0f}, y={area.y:.0f}, w={area.width:.0f}, h={area.height:.0f}.", silent)
+    log(f"Waiting for inactivity; activity starts after {idle_threshold_seconds} idle seconds.", silent)
     if schedule and schedule.pause_minutes is not None:
         resume_text = " and resumes on user activity" if schedule.auto_resume else ""
-        print(f"Auto-pauses after {format_minutes(schedule.pause_minutes)}{resume_text}.")
-    print("Stop with Ctrl+C or close this terminal.")
+        log(f"Scheduled pause is enabled after {format_minutes(schedule.pause_minutes)}{resume_text}.", silent)
+    log("Stop with Ctrl+C or close this terminal.", silent)
 
     while RUNNING:
         if should_auto_pause(schedule):
-            wait_for_auto_resume(schedule)
+            wait_for_auto_resume(schedule, silent)
             continue
+        log(
+            f"Waiting because user activity is still recent; idle={idle_seconds():.1f}s, threshold={idle_threshold_seconds}s.",
+            silent,
+        )
         while RUNNING and idle_seconds() < idle_threshold_seconds:
             if should_auto_pause(schedule):
-                wait_for_auto_resume(schedule)
+                wait_for_auto_resume(schedule, silent)
                 break
             time.sleep(1)
         if not RUNNING:
@@ -476,46 +519,56 @@ def run(
         if should_auto_pause(schedule):
             continue
 
-        print("Inactive threshold reached; automation active.")
+        log(f"Starting activity because idle threshold reached; idle={idle_seconds():.1f}s.", silent)
         mark_automation_activity()
         while RUNNING:
             if should_auto_pause(schedule):
-                wait_for_auto_resume(schedule)
+                wait_for_auto_resume(schedule, silent)
                 break
             wait_ms = random.randint(min_interval_ms, max(max_interval_ms, min_interval_ms + 250))
             if not sleep_interruptible(wait_ms / 1000.0, stop_on_user_activity=True):
-                print("User activity detected; automation paused.")
+                log("Pausing activity because user input was detected during the wait interval.", silent)
                 break
             if not RUNNING:
                 break
             if should_auto_pause(schedule):
-                wait_for_auto_resume(schedule)
+                wait_for_auto_resume(schedule, silent)
                 break
 
             target = random_point(area)
+            actions = choose_actions()
+            log(
+                "Starting activity tick because timer elapsed; "
+                f"moving to x={target.x:.0f}, y={target.y:.0f}; actions={', '.join(actions)}.",
+                silent,
+            )
             move_naturally(target)
             if user_activity_detected():
-                print("User activity detected; automation paused.")
+                log("Pausing activity because user input was detected during mouse movement.", silent)
                 break
 
-            for action in choose_actions()[1:]:
+            for action in actions[1:]:
                 if not RUNNING:
                     break
                 if should_auto_pause(schedule):
-                    wait_for_auto_resume(schedule)
+                    wait_for_auto_resume(schedule, silent)
                     break
                 if not sleep_interruptible(0.12, stop_on_user_activity=True):
-                    print("User activity detected; automation paused.")
+                    log(f"Pausing activity because user input was detected before {action}.", silent)
                     break
                 if action == "click":
+                    log("Performing click because this activity tick selected click.", silent)
                     click()
                 elif action == "scroll":
                     amount = next_scroll_amount(scroll_direction)
                     scroll_direction *= -1
+                    log(f"Performing smooth scroll of {amount} lines because this activity tick selected scroll.", silent)
                     smooth_scroll(amount)
             if user_activity_detected():
-                print("User activity detected; automation paused.")
+                log("Pausing activity because user input was detected after activity tick.", silent)
                 break
+
+    log("Stopping because the process received a stop signal.", silent)
 
 
 def parse_args() -> argparse.Namespace:
@@ -534,9 +587,21 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="After auto-pause, resume when real user activity is detected.",
     )
-    return parser.parse_args()
+    parser.add_argument(
+        "--silent",
+        action="store_true",
+        help="Show a brief startup animation, clear the terminal, then keep only a minimal running message.",
+    )
+    argv = sys.argv[1:]
+    if argv and argv[0] == "--":
+        argv = argv[1:]
+    return parser.parse_args(argv)
 
 
 if __name__ == "__main__":
     args = parse_args()
-    run(default_area(), schedule=AutoPauseSchedule(pause_minutes=args.auto_pause, auto_resume=args.auto_resume))
+    run(
+        default_area(),
+        schedule=AutoPauseSchedule(pause_minutes=args.auto_pause, auto_resume=args.auto_resume),
+        silent=args.silent,
+    )

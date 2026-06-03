@@ -15,7 +15,13 @@ npx github:flyon/EverFlow
 With an automatic evening pause and user-activity resume:
 
 ```bash
-npx github:flyon/EverFlow -- --autoPause=6pm --autoResume
+npx github:flyon/EverFlow --autoPause=6pm --autoResume
+```
+
+Minimal terminal output:
+
+```bash
+npx github:flyon/EverFlow --autoPause=18:00 --autoResume --silent
 ```
 
 Or run the Python file directly:
@@ -59,3 +65,4 @@ No Python packages are required. If the script is not able to affect the current
 - Defaults to the centered third of the main display.
 - Auto-starts after 3 minutes of inactivity.
 - Optional `--autoPause` accepts local times like `6pm`, `6:30pm`, `18:00`, or `1830`.
+- Optional `--silent` hides operational logs after a short startup animation.
