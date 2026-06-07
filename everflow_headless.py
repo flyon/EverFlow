@@ -135,8 +135,11 @@ class Rect:
 class AutoPauseSchedule:
     pause_minutes: int | None = None
     auto_resume: bool = False
+    jitter_minutes: int = 10
     paused_for_date: dt.date | None = None
     resumed_for_date: dt.date | None = None
+    effective_pause_date: dt.date | None = None
+    effective_pause_minutes: int | None = None
 
 
 def stop(_signum: int, _frame: object) -> None:
@@ -297,6 +300,7 @@ def parse_time_of_day(value: str) -> int:
 
 
 def format_minutes(minutes: int) -> str:
+    minutes = minutes % (24 * 60)
     hour = minutes // 60
     minute = minutes % 60
     suffix = "am" if hour < 12 else "pm"
@@ -306,6 +310,17 @@ def format_minutes(minutes: int) -> str:
     return f"{display_hour}:{minute:02d}{suffix}"
 
 
+def effective_pause_minutes(schedule: AutoPauseSchedule, today: dt.date | None = None) -> int:
+    if schedule.pause_minutes is None:
+        raise ValueError("pause_minutes is required")
+    today = today or dt.date.today()
+    if schedule.effective_pause_date != today or schedule.effective_pause_minutes is None:
+        jitter = random.randint(-schedule.jitter_minutes, schedule.jitter_minutes)
+        schedule.effective_pause_date = today
+        schedule.effective_pause_minutes = (schedule.pause_minutes + jitter) % (24 * 60)
+    return schedule.effective_pause_minutes
+
+
 def should_auto_pause(schedule: AutoPauseSchedule | None) -> bool:
     if schedule is None or schedule.pause_minutes is None:
         return False
@@ -313,19 +328,25 @@ def should_auto_pause(schedule: AutoPauseSchedule | None) -> bool:
     now = dt.datetime.now()
     today = now.date()
     current_minutes = now.hour * 60 + now.minute
-    if current_minutes < schedule.pause_minutes:
+    pause_minutes = effective_pause_minutes(schedule, today)
+
+    if schedule.paused_for_date is not None and schedule.resumed_for_date != schedule.paused_for_date:
+        return True
+
+    if current_minutes < pause_minutes:
         return False
-    if schedule.resumed_for_date == today:
+    if schedule.paused_for_date == today:
         return False
     return True
 
 
 def wait_for_auto_resume(schedule: AutoPauseSchedule, silent: bool = False) -> None:
     today = dt.date.today()
+    pause_minutes = effective_pause_minutes(schedule, today)
     if schedule.paused_for_date != today:
         schedule.paused_for_date = today
         log(
-            f"Pausing activity because auto-pause time {format_minutes(schedule.pause_minutes or 0)} has passed.",
+            f"Pausing activity because today's auto-pause time {format_minutes(pause_minutes)} has passed.",
             silent,
         )
 
@@ -335,12 +356,20 @@ def wait_for_auto_resume(schedule: AutoPauseSchedule, silent: bool = False) -> N
             time.sleep(1)
         return
 
-    log("Waiting to resume because --autoResume is enabled and no user activity has been detected yet.", silent)
+    log(
+        "Waiting to resume because --autoResume is enabled; activity remains paused until user input is detected in the next pre-pause window.",
+        silent,
+    )
     while RUNNING and should_auto_pause(schedule):
-        if user_activity_detected():
-            schedule.resumed_for_date = dt.date.today()
+        now = dt.datetime.now()
+        current_minutes = now.hour * 60 + now.minute
+        pause_minutes = effective_pause_minutes(schedule, now.date())
+        is_after_pause_day = schedule.paused_for_date is not None and now.date() > schedule.paused_for_date
+        is_before_pause_time = current_minutes < pause_minutes
+        if is_after_pause_day and is_before_pause_time and user_activity_detected():
+            schedule.resumed_for_date = schedule.paused_for_date
             mark_automation_activity()
-            log("Resuming activity because user activity was detected after scheduled pause.", silent)
+            log("Resuming activity because user input was detected after the overnight scheduled pause.", silent)
             return
         time.sleep(0.5)
 
@@ -498,17 +527,19 @@ def run(
     log(f"Waiting for inactivity; activity starts after {idle_threshold_seconds} idle seconds.", silent)
     if schedule and schedule.pause_minutes is not None:
         resume_text = " and resumes on user activity" if schedule.auto_resume else ""
-        log(f"Scheduled pause is enabled after {format_minutes(schedule.pause_minutes)}{resume_text}.", silent)
+        todays_pause = effective_pause_minutes(schedule)
+        log(
+            f"Scheduled pause is centered on {format_minutes(schedule.pause_minutes)} "
+            f"with +/-{schedule.jitter_minutes}m jitter; today's pause time is {format_minutes(todays_pause)}{resume_text}.",
+            silent,
+        )
     log("Stop with Ctrl+C or close this terminal.", silent)
 
     while RUNNING:
         if should_auto_pause(schedule):
             wait_for_auto_resume(schedule, silent)
             continue
-        log(
-            f"Waiting because user activity is still recent; idle={idle_seconds():.1f}s, threshold={idle_threshold_seconds}s.",
-            silent,
-        )
+        log("Waiting because activity has not reached the idle threshold yet.", silent)
         while RUNNING and idle_seconds() < idle_threshold_seconds:
             if should_auto_pause(schedule):
                 wait_for_auto_resume(schedule, silent)
@@ -537,11 +568,6 @@ def run(
 
             target = random_point(area)
             actions = choose_actions()
-            log(
-                "Starting activity tick because timer elapsed; "
-                f"moving to x={target.x:.0f}, y={target.y:.0f}; actions={', '.join(actions)}.",
-                silent,
-            )
             move_naturally(target)
             if user_activity_detected():
                 log("Pausing activity because user input was detected during mouse movement.", silent)
@@ -557,12 +583,10 @@ def run(
                     log(f"Pausing activity because user input was detected before {action}.", silent)
                     break
                 if action == "click":
-                    log("Performing click because this activity tick selected click.", silent)
                     click()
                 elif action == "scroll":
                     amount = next_scroll_amount(scroll_direction)
                     scroll_direction *= -1
-                    log(f"Performing smooth scroll of {amount} lines because this activity tick selected scroll.", silent)
                     smooth_scroll(amount)
             if user_activity_detected():
                 log("Pausing activity because user input was detected after activity tick.", silent)
@@ -592,6 +616,14 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Show a brief startup animation, clear the terminal, then keep only a minimal running message.",
     )
+    parser.add_argument(
+        "--pauseJitterMinutes",
+        "--pause-jitter-minutes",
+        dest="pause_jitter_minutes",
+        type=int,
+        default=10,
+        help="Randomize the daily auto-pause time by this many minutes in either direction. Default: 10.",
+    )
     argv = sys.argv[1:]
     if argv and argv[0] == "--":
         argv = argv[1:]
@@ -602,6 +634,10 @@ if __name__ == "__main__":
     args = parse_args()
     run(
         default_area(),
-        schedule=AutoPauseSchedule(pause_minutes=args.auto_pause, auto_resume=args.auto_resume),
+        schedule=AutoPauseSchedule(
+            pause_minutes=args.auto_pause,
+            auto_resume=args.auto_resume,
+            jitter_minutes=max(0, args.pause_jitter_minutes),
+        ),
         silent=args.silent,
     )
