@@ -97,6 +97,7 @@ if IS_WINDOWS:
     USER32.IsWindowVisible.restype = ctypes.c_bool
     USER32.ShowWindow.argtypes = [ctypes.c_void_p, ctypes.c_int]
     USER32.ShowWindow.restype = ctypes.c_bool
+    USER32.GetForegroundWindow.restype = ctypes.c_void_p
     USER32.SetForegroundWindow.argtypes = [ctypes.c_void_p]
     USER32.SetForegroundWindow.restype = ctypes.c_bool
     USER32.mouse_event.argtypes = [
@@ -314,6 +315,43 @@ def target_app_variants(target_app: str) -> list[str]:
     return aliases.get(normalized, [target_app.strip()])
 
 
+def capture_foreground_target() -> str | int | None:
+    if IS_MACOS:
+        script = 'tell application "System Events" to get name of first application process whose frontmost is true'
+        result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=3)
+        if result.returncode == 0:
+            foreground = result.stdout.strip()
+            return foreground or None
+        return None
+    if IS_WINDOWS:
+        hwnd = USER32.GetForegroundWindow()
+        return int(hwnd) if hwnd else None
+    return None
+
+
+def restore_foreground_target(target: str | int | None) -> bool:
+    if target is None:
+        return False
+    if IS_MACOS and isinstance(target, str):
+        escaped_target = target.replace("\\", "\\\\").replace('"', '\\"')
+        script = f'tell application "{escaped_target}" to activate\n'
+        result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=3)
+        if result.returncode == 0:
+            mark_automation_activity()
+            time.sleep(0.25)
+            return True
+        return False
+    if IS_WINDOWS and isinstance(target, int):
+        USER32.ShowWindow(target, WIN_SW_RESTORE)
+        time.sleep(0.1)
+        restored = bool(USER32.SetForegroundWindow(target))
+        if restored:
+            mark_automation_activity()
+            time.sleep(0.25)
+        return restored
+    return False
+
+
 def focus_target_app(target_app: str) -> bool:
     variants = [variant for variant in target_app_variants(target_app) if variant]
     if not variants:
@@ -374,6 +412,23 @@ def focus_target_app_windows(variants: list[str]) -> bool:
         mark_automation_activity()
         time.sleep(0.35)
     return focused
+
+
+def prove_target_app_focus(target_app: str, silent: bool = False) -> bool:
+    previous = capture_foreground_target()
+    log(f"Checking target app '{target_app}' at startup.", silent)
+    focused = focus_target_app(target_app)
+    if not focused:
+        log(f"Target app check failed: '{target_app}' is not open or could not be focused.", silent)
+        return False
+
+    log(f"Target app check passed: focused '{target_app}' for 1 second.", silent)
+    time.sleep(1)
+    if restore_foreground_target(previous):
+        log("Returned focus to the previous terminal/window after target app check.", silent)
+    else:
+        log("Could not automatically return focus to the previous terminal/window after target app check.", silent)
+    return True
 
 
 def parse_time_of_day(value: str) -> int:
@@ -625,6 +680,7 @@ def run(
         )
     if target_app:
         log(f"Target app guard is enabled for '{target_app}'; activity will pause if it cannot be focused.", silent)
+        prove_target_app_focus(target_app, silent)
     log("Stop with Ctrl+C or close this terminal.", silent)
 
     while RUNNING:

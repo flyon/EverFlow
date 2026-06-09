@@ -73,5 +73,5 @@ No Python packages are required. If the script is not able to affect the current
 - Optional `--autoPause` accepts local times like `6pm`, `6:30pm`, `18:00`, or `1830`.
 - The auto-pause time is randomized by +/-10 minutes by default; adjust with `--pauseJitterMinutes=0`.
 - With `--autoResume`, a scheduled pause stays active overnight and resumes only after user input before the next pause time.
-- Optional `--targetApp=vscode` focuses VS Code before activity and pauses if it cannot be focused.
+- Optional `--targetApp=vscode` checks/focuses VS Code at startup, returns to the terminal, and pauses later if VS Code cannot be focused.
 - Optional `--silent` hides operational logs after a short startup animation.
