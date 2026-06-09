@@ -20,6 +20,7 @@ import datetime as dt
 import math
 import random
 import signal
+import subprocess
 import sys
 import time
 from dataclasses import dataclass
@@ -34,6 +35,7 @@ if not (IS_MACOS or IS_WINDOWS):
 APP = None
 USER32 = None
 KERNEL32 = None
+WIN_ENUM_WINDOWS_PROC = None
 
 
 class CGPoint(ctypes.Structure):
@@ -77,6 +79,7 @@ if IS_MACOS:
 if IS_WINDOWS:
     USER32 = ctypes.windll.user32
     KERNEL32 = ctypes.windll.kernel32
+    WIN_ENUM_WINDOWS_PROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
     USER32.SetProcessDPIAware()
     USER32.GetSystemMetrics.argtypes = [ctypes.c_int]
     USER32.GetSystemMetrics.restype = ctypes.c_int
@@ -84,6 +87,18 @@ if IS_WINDOWS:
     USER32.GetCursorPos.restype = ctypes.c_bool
     USER32.SetCursorPos.argtypes = [ctypes.c_int, ctypes.c_int]
     USER32.SetCursorPos.restype = ctypes.c_bool
+    USER32.EnumWindows.argtypes = [WIN_ENUM_WINDOWS_PROC, ctypes.c_void_p]
+    USER32.EnumWindows.restype = ctypes.c_bool
+    USER32.GetWindowTextLengthW.argtypes = [ctypes.c_void_p]
+    USER32.GetWindowTextLengthW.restype = ctypes.c_int
+    USER32.GetWindowTextW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_int]
+    USER32.GetWindowTextW.restype = ctypes.c_int
+    USER32.IsWindowVisible.argtypes = [ctypes.c_void_p]
+    USER32.IsWindowVisible.restype = ctypes.c_bool
+    USER32.ShowWindow.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    USER32.ShowWindow.restype = ctypes.c_bool
+    USER32.SetForegroundWindow.argtypes = [ctypes.c_void_p]
+    USER32.SetForegroundWindow.restype = ctypes.c_bool
     USER32.mouse_event.argtypes = [
         ctypes.c_uint,
         ctypes.c_uint,
@@ -111,6 +126,7 @@ WIN_MOUSEEVENTF_LEFTDOWN = 0x0002
 WIN_MOUSEEVENTF_LEFTUP = 0x0004
 WIN_MOUSEEVENTF_WHEEL = 0x0800
 WIN_WHEEL_DELTA = 120
+WIN_SW_RESTORE = 9
 
 
 RUNNING = True
@@ -285,6 +301,79 @@ def run_silent_intro() -> None:
     sys.stdout.write("\033[2J\033[H")
     sys.stdout.flush()
     print("EF Running...", flush=True)
+
+
+def target_app_variants(target_app: str) -> list[str]:
+    normalized = target_app.strip().lower()
+    aliases = {
+        "code": ["Visual Studio Code"],
+        "vs code": ["Visual Studio Code"],
+        "vscode": ["Visual Studio Code"],
+        "visual studio code": ["Visual Studio Code"],
+    }
+    return aliases.get(normalized, [target_app.strip()])
+
+
+def focus_target_app(target_app: str) -> bool:
+    variants = [variant for variant in target_app_variants(target_app) if variant]
+    if not variants:
+        return True
+    if IS_MACOS:
+        return focus_target_app_macos(variants)
+    if IS_WINDOWS:
+        return focus_target_app_windows(variants)
+    return False
+
+
+def focus_target_app_macos(variants: list[str]) -> bool:
+    for app_name in variants:
+        escaped_app_name = app_name.replace("\\", "\\\\").replace('"', '\\"')
+        script = (
+            f'if application "{escaped_app_name}" is running then\n'
+            f'  tell application "{escaped_app_name}" to activate\n'
+            "  return true\n"
+            "else\n"
+            "  return false\n"
+            "end if\n"
+        )
+        result = subprocess.run(["osascript", "-e", script], capture_output=True, text=True, timeout=3)
+        if result.returncode == 0 and result.stdout.strip().lower() == "true":
+            mark_automation_activity()
+            time.sleep(0.35)
+            return True
+    return False
+
+
+def focus_target_app_windows(variants: list[str]) -> bool:
+    lowered_variants = [variant.lower() for variant in variants]
+    matches: list[tuple[int, str]] = []
+
+    def enum_window(hwnd: int, _lparam: int) -> bool:
+        if not USER32.IsWindowVisible(hwnd):
+            return True
+        length = USER32.GetWindowTextLengthW(hwnd)
+        if length <= 0:
+            return True
+        buffer = ctypes.create_unicode_buffer(length + 1)
+        USER32.GetWindowTextW(hwnd, buffer, length + 1)
+        title = buffer.value.strip()
+        if title and any(variant in title.lower() for variant in lowered_variants):
+            matches.append((hwnd, title))
+        return True
+
+    callback = WIN_ENUM_WINDOWS_PROC(enum_window)
+    USER32.EnumWindows(callback, None)
+    if not matches:
+        return False
+
+    hwnd, _title = matches[0]
+    USER32.ShowWindow(hwnd, WIN_SW_RESTORE)
+    time.sleep(0.15)
+    focused = bool(USER32.SetForegroundWindow(hwnd))
+    if focused:
+        mark_automation_activity()
+        time.sleep(0.35)
+    return focused
 
 
 def parse_time_of_day(value: str) -> int:
@@ -512,6 +601,7 @@ def run(
     idle_threshold_seconds: int = 180,
     schedule: AutoPauseSchedule | None = None,
     silent: bool = False,
+    target_app: str | None = None,
 ) -> None:
     if IS_MACOS and not APP.AXIsProcessTrusted():
         print("Accessibility permission is not enabled.")
@@ -533,6 +623,8 @@ def run(
             f"with +/-{schedule.jitter_minutes}m jitter; today's pause time is {format_minutes(todays_pause)}{resume_text}.",
             silent,
         )
+    if target_app:
+        log(f"Target app guard is enabled for '{target_app}'; activity will pause if it cannot be focused.", silent)
     log("Stop with Ctrl+C or close this terminal.", silent)
 
     while RUNNING:
@@ -550,6 +642,11 @@ def run(
         if should_auto_pause(schedule):
             continue
 
+        if target_app and not focus_target_app(target_app):
+            log(f"Pausing activity because target app '{target_app}' is not open or could not be focused.", silent)
+            sleep_interruptible(30, stop_on_user_activity=True)
+            continue
+
         log(f"Starting activity because idle threshold reached; idle={idle_seconds():.1f}s.", silent)
         mark_automation_activity()
         while RUNNING:
@@ -564,6 +661,11 @@ def run(
                 break
             if should_auto_pause(schedule):
                 wait_for_auto_resume(schedule, silent)
+                break
+
+            if target_app and not focus_target_app(target_app):
+                log(f"Pausing activity because target app '{target_app}' is no longer focusable.", silent)
+                sleep_interruptible(30, stop_on_user_activity=True)
                 break
 
             target = random_point(area)
@@ -624,6 +726,12 @@ def parse_args() -> argparse.Namespace:
         default=10,
         help="Randomize the daily auto-pause time by this many minutes in either direction. Default: 10.",
     )
+    parser.add_argument(
+        "--targetApp",
+        "--target-app",
+        dest="target_app",
+        help="Focus this app before activity. Use 'vscode', 'vs code', or 'Visual Studio Code' for VS Code.",
+    )
     argv = sys.argv[1:]
     if argv and argv[0] == "--":
         argv = argv[1:]
@@ -640,4 +748,5 @@ if __name__ == "__main__":
             jitter_minutes=max(0, args.pause_jitter_minutes),
         ),
         silent=args.silent,
+        target_app=args.target_app,
     )
