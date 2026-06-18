@@ -30,6 +30,12 @@ Keep activity scoped to VS Code:
 npx github:flyon/EverFlow --autoPause=18:00 --autoResume --targetApp=vscode
 ```
 
+With VS Code targeting, lunch pause, and evening pause:
+
+```bash
+npx github:flyon/EverFlow --targetApp=vscode --lunchPause=13:00-14:00 --autoPause=18:00 --autoResume
+```
+
 Or run the Python file directly:
 
 ```bash
@@ -73,5 +79,6 @@ No Python packages are required. If the script is not able to affect the current
 - Optional `--autoPause` accepts local times like `6pm`, `6:30pm`, `18:00`, or `1830`.
 - The auto-pause time is randomized by +/-10 minutes by default; adjust with `--pauseJitterMinutes=0`.
 - With `--autoResume`, a scheduled pause stays active overnight and resumes only after user input before the next pause time.
-- Optional `--targetApp=vscode` checks/focuses VS Code at startup, returns to the terminal, and pauses later if VS Code cannot be focused.
+- Optional `--lunchPause=13:00-14:00` pauses for that exact bounded window and resumes automatically afterward.
+- Optional `--targetApp=vscode` checks/focuses VS Code at startup, returns to the terminal, maximizes VS Code on Windows before activity, and pauses later if VS Code cannot be focused.
 - Optional `--silent` hides operational logs after a short startup animation.

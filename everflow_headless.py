@@ -127,6 +127,7 @@ WIN_MOUSEEVENTF_LEFTDOWN = 0x0002
 WIN_MOUSEEVENTF_LEFTUP = 0x0004
 WIN_MOUSEEVENTF_WHEEL = 0x0800
 WIN_WHEEL_DELTA = 120
+WIN_SW_MAXIMIZE = 3
 WIN_SW_RESTORE = 9
 
 
@@ -157,6 +158,14 @@ class AutoPauseSchedule:
     resumed_for_date: dt.date | None = None
     effective_pause_date: dt.date | None = None
     effective_pause_minutes: int | None = None
+
+
+@dataclass
+class LunchPause:
+    start_minutes: int
+    end_minutes: int
+    paused_for_date: dt.date | None = None
+    resumed_for_date: dt.date | None = None
 
 
 def stop(_signum: int, _frame: object) -> None:
@@ -405,7 +414,7 @@ def focus_target_app_windows(variants: list[str]) -> bool:
         return False
 
     hwnd, _title = matches[0]
-    USER32.ShowWindow(hwnd, WIN_SW_RESTORE)
+    USER32.ShowWindow(hwnd, WIN_SW_MAXIMIZE)
     time.sleep(0.15)
     focused = bool(USER32.SetForegroundWindow(hwnd))
     if focused:
@@ -441,6 +450,24 @@ def parse_time_of_day(value: str) -> int:
         except ValueError:
             pass
     raise argparse.ArgumentTypeError("Use a local time like 6pm, 6:30pm, 18:00, or 1800.")
+
+
+def parse_time_range(value: str) -> LunchPause:
+    normalized = value.strip()
+    if "-" in normalized:
+        start_value, end_value = normalized.split("-", 1)
+    elif "to" in normalized.lower():
+        lower_value = normalized.lower()
+        separator_index = lower_value.index("to")
+        start_value = normalized[:separator_index]
+        end_value = normalized[separator_index + 2 :]
+    else:
+        raise argparse.ArgumentTypeError("Use a range like 13:00-14:00 or 1pm-2pm.")
+    start_minutes = parse_time_of_day(start_value)
+    end_minutes = parse_time_of_day(end_value)
+    if start_minutes == end_minutes:
+        raise argparse.ArgumentTypeError("Lunch pause start and end must be different.")
+    return LunchPause(start_minutes=start_minutes, end_minutes=end_minutes)
 
 
 def format_minutes(minutes: int) -> str:
@@ -516,6 +543,49 @@ def wait_for_auto_resume(schedule: AutoPauseSchedule, silent: bool = False) -> N
             log("Resuming activity because user input was detected after the overnight scheduled pause.", silent)
             return
         time.sleep(0.5)
+
+
+def minutes_until(target_minutes: int, now: dt.datetime | None = None) -> int:
+    now = now or dt.datetime.now()
+    current_minutes = now.hour * 60 + now.minute
+    delta = target_minutes - current_minutes
+    if delta <= 0:
+        delta += 24 * 60
+    return delta
+
+
+def is_lunch_pause_active(lunch_pause: LunchPause | None) -> bool:
+    if lunch_pause is None:
+        return False
+
+    now = dt.datetime.now()
+    today = now.date()
+    current_minutes = now.hour * 60 + now.minute
+    if lunch_pause.resumed_for_date == today:
+        return False
+    if lunch_pause.start_minutes < lunch_pause.end_minutes:
+        return lunch_pause.start_minutes <= current_minutes < lunch_pause.end_minutes
+    return current_minutes >= lunch_pause.start_minutes or current_minutes < lunch_pause.end_minutes
+
+
+def wait_for_lunch_resume(lunch_pause: LunchPause, silent: bool = False) -> None:
+    today = dt.date.today()
+    if lunch_pause.paused_for_date != today:
+        lunch_pause.paused_for_date = today
+        log(
+            f"Pausing activity because lunch pause is active from {format_minutes(lunch_pause.start_minutes)} "
+            f"to {format_minutes(lunch_pause.end_minutes)}.",
+            silent,
+        )
+
+    while RUNNING and is_lunch_pause_active(lunch_pause):
+        remaining_minutes = minutes_until(lunch_pause.end_minutes)
+        time.sleep(min(30, max(1, remaining_minutes * 60)))
+
+    if RUNNING:
+        lunch_pause.resumed_for_date = dt.date.today()
+        mark_automation_activity()
+        log(f"Resuming activity because lunch pause ended at {format_minutes(lunch_pause.end_minutes)}.", silent)
 
 
 def sleep_interruptible(seconds: float, stop_on_user_activity: bool = False) -> bool:
@@ -655,6 +725,7 @@ def run(
     max_interval_ms: int = 7000,
     idle_threshold_seconds: int = 180,
     schedule: AutoPauseSchedule | None = None,
+    lunch_pause: LunchPause | None = None,
     silent: bool = False,
     target_app: str | None = None,
 ) -> None:
@@ -678,23 +749,37 @@ def run(
             f"with +/-{schedule.jitter_minutes}m jitter; today's pause time is {format_minutes(todays_pause)}{resume_text}.",
             silent,
         )
+    if lunch_pause:
+        log(
+            f"Lunch pause is enabled from {format_minutes(lunch_pause.start_minutes)} "
+            f"to {format_minutes(lunch_pause.end_minutes)} and resumes automatically.",
+            silent,
+        )
     if target_app:
         log(f"Target app guard is enabled for '{target_app}'; activity will pause if it cannot be focused.", silent)
         prove_target_app_focus(target_app, silent)
     log("Stop with Ctrl+C or close this terminal.", silent)
 
     while RUNNING:
+        if is_lunch_pause_active(lunch_pause):
+            wait_for_lunch_resume(lunch_pause, silent)
+            continue
         if should_auto_pause(schedule):
             wait_for_auto_resume(schedule, silent)
             continue
         log("Waiting because activity has not reached the idle threshold yet.", silent)
         while RUNNING and idle_seconds() < idle_threshold_seconds:
+            if is_lunch_pause_active(lunch_pause):
+                wait_for_lunch_resume(lunch_pause, silent)
+                break
             if should_auto_pause(schedule):
                 wait_for_auto_resume(schedule, silent)
                 break
             time.sleep(1)
         if not RUNNING:
             break
+        if is_lunch_pause_active(lunch_pause):
+            continue
         if should_auto_pause(schedule):
             continue
 
@@ -706,6 +791,9 @@ def run(
         log(f"Starting activity because idle threshold reached; idle={idle_seconds():.1f}s.", silent)
         mark_automation_activity()
         while RUNNING:
+            if is_lunch_pause_active(lunch_pause):
+                wait_for_lunch_resume(lunch_pause, silent)
+                break
             if should_auto_pause(schedule):
                 wait_for_auto_resume(schedule, silent)
                 break
@@ -714,6 +802,9 @@ def run(
                 log("Pausing activity because user input was detected during the wait interval.", silent)
                 break
             if not RUNNING:
+                break
+            if is_lunch_pause_active(lunch_pause):
+                wait_for_lunch_resume(lunch_pause, silent)
                 break
             if should_auto_pause(schedule):
                 wait_for_auto_resume(schedule, silent)
@@ -733,6 +824,9 @@ def run(
 
             for action in actions[1:]:
                 if not RUNNING:
+                    break
+                if is_lunch_pause_active(lunch_pause):
+                    wait_for_lunch_resume(lunch_pause, silent)
                     break
                 if should_auto_pause(schedule):
                     wait_for_auto_resume(schedule, silent)
@@ -788,6 +882,13 @@ def parse_args() -> argparse.Namespace:
         dest="target_app",
         help="Focus this app before activity. Use 'vscode', 'vs code', or 'Visual Studio Code' for VS Code.",
     )
+    parser.add_argument(
+        "--lunchPause",
+        "--lunch-pause",
+        dest="lunch_pause",
+        type=parse_time_range,
+        help="Pause for a bounded lunch window, for example 13:00-14:00 or 1pm-2pm. Resumes automatically at the end.",
+    )
     argv = sys.argv[1:]
     if argv and argv[0] == "--":
         argv = argv[1:]
@@ -803,6 +904,7 @@ if __name__ == "__main__":
             auto_resume=args.auto_resume,
             jitter_minutes=max(0, args.pause_jitter_minutes),
         ),
+        lunch_pause=args.lunch_pause,
         silent=args.silent,
         target_app=args.target_app,
     )
